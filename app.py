@@ -244,46 +244,54 @@ st.markdown("---")
 
 # ---------------- KPI Panel ----------------
 st.markdown("## 🧭 Panel KPI mensual (tipo '1 Envío - 30 Min')")
-st.caption("Define cómo se calcula cada KPI: por **conteo de filas con un valor categórico** o por **suma de una columna numérica**.")
+st.caption("Defaults se aplican solo en el primer render. Tus cambios no se sobrescriben.")
 
-calc_mode = st.radio("Modo de cálculo de KPIs", ["Conteo por valor categórico", "Suma de columna numérica"], horizontal=True)
-
-def kpi_selector(name):
+def kpi_selector(name, default_col=None, default_vals=None):
+    calc_mode = st.session_state.get("calc_mode", "Conteo por valor categórico")
     if calc_mode == "Conteo por valor categórico":
-        col = st.selectbox(f"{name}: columna categórica", options=list(df.columns), key=f"cat_{name}")
+        options = list(df.columns)
+        if default_col in options and f"cat_{name}" not in st.session_state:
+            cat_index = options.index(default_col)
+        else:
+            cat_index = 0
+        col = st.selectbox(f"{name}: columna categórica", options=options, index=cat_index, key=f"cat_{name}")
         values = sorted(df[col].astype(str).unique().tolist())
-        val = st.multiselect(f"{name}: valores que cuentan", options=values, key=f"vals_{name}")
+        if default_vals and f"vals_{name}" not in st.session_state and col == default_col:
+            val = st.multiselect(f"{name}: valores que cuentan", options=values, default=[v for v in default_vals if v in values], key=f"vals_{name}")
+        else:
+            val = st.multiselect(f"{name}: valores que cuentan", options=values, key=f"vals_{name}")
         return {"mode": "count_by_value", "column": col, "values": val}
     else:
-        col = st.selectbox(f"{name}: columna numérica (se sumará)", options=list(df.columns), key=f"num_{name}")
+        options = list(df.columns)
+        if default_col in options and f"num_{name}" not in st.session_state:
+            idx = options.index(default_col)
+        else:
+            idx = 0
+        col = st.selectbox(f"{name}: columna numérica (se sumará)", options=options, index=idx, key=f"num_{name}")
         return {"mode": "sum_numeric", "column": col}
+
+calc_mode = st.radio("Modo de cálculo de KPIs", ["Conteo por valor categórico", "Suma de columna numérica"], horizontal=True, key="calc_mode")
+
+# Suggested defaults passed as defaults only
+env_def_col, env_def_vals = None, None
+ent_def_col, ent_def_vals = None, None
+clk_def_col, clk_def_vals = None, None
+ava_def_col, ava_def_vals = None, None
+
+if "Estado del despliegue" in df.columns:
+    env_def_col, env_def_vals = "Estado del despliegue", ["En proceso","Enviado","Entregado"]
+    ent_def_col, ent_def_vals = "Estado del despliegue", ["Entregado"]
+if "hubspot_treble_avances_emp_0" in df.columns:
+    ava_def_col = "hubspot_treble_avances_emp_0"
+    ava_def_vals = [v for v in df["hubspot_treble_avances_emp_0"].astype(str).unique().tolist() if str(v) not in ["0","nan",""]]
 
 colA, colB = st.columns(2)
 with colA:
-    rule_envios = kpi_selector("Envios")
-    rule_entregas = kpi_selector("Entregas")
+    rule_envios = kpi_selector("Envios", default_col=env_def_col, default_vals=env_def_vals)
+    rule_entregas = kpi_selector("Entregas", default_col=ent_def_col, default_vals=ent_def_vals)
 with colB:
-    rule_clicks = kpi_selector("Clics")
-    rule_avance = kpi_selector("Avance")
-
-# Suggested defaults
-suggested = False
-if calc_mode == "Conteo por valor categórico":
-    def set_rule(col_name, ok_vals):
-        return {"mode":"count_by_value", "column": col_name, "values": ok_vals}
-    if "Estado del despliegue" in df.columns:
-        vals = normalize_str_series(df["Estado del despliegue"]).unique().tolist()
-        if "enviado" in vals or "en proceso" in vals:
-            rule_envios = set_rule("Estado del despliegue", ["En proceso","Enviado","Entregado"]); suggested = True
-        if "entregado" in vals:
-            rule_entregas = set_rule("Estado del despliegue", ["Entregado"]); suggested = True
-    if "hubspot_treble_avances_emp_0" in df.columns:
-        nonzero = [v for v in df["hubspot_treble_avances_emp_0"].astype(str).unique().tolist() if str(v) not in ["0","nan",""]]
-        if nonzero:
-            rule_avance = set_rule("hubspot_treble_avances_emp_0", nonzero); suggested = True
-
-if suggested:
-    st.info("Se pre-cargaron reglas sugeridas con base en los nombres de columnas detectados. Ajusta si es necesario.")
+    rule_clicks = kpi_selector("Clics", default_col=clk_def_col, default_vals=clk_def_vals)
+    rule_avance = kpi_selector("Avance", default_col=ava_def_col, default_vals=ava_def_vals)
 
 def apply_rule(group_df, rule):
     if rule["mode"] == "count_by_value":
@@ -342,4 +350,4 @@ col1.download_button("⬇ Descargar KPI (crudo, CSV)", data=kpi_df.to_csv(index=
 col2.download_button("⬇ Descargar KPI (formateado, CSV)", data=disp_df.to_csv(index=False).encode("utf-8"),
                      file_name="kpi_mensual_formateado.csv", mime="text/csv")
 
-st.caption("Modo por defecto: cortar 'YYYY-MM' de los primeros 7 caracteres. Si necesitas dejar reglas fijas para Envios/Entregas/Clics/Avance, dímelo y lo codifico por defecto.")
+st.caption("Defaults sugeridos solo en el primer render. Luego, tus cambios en los selectores mandan.")
