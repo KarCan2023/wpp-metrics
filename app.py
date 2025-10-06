@@ -10,9 +10,38 @@ import streamlit as st
 st.set_page_config(page_title="Resumen mensual Treble.ai", page_icon="📊", layout="wide")
 
 # ------------- Utilidades -------------
+
 @st.cache_data
-def load_csv(file_bytes, sep=None):
-    return pd.read_csv(io.BytesIO(file_bytes), sep=sep or None, engine="python")
+def load_csv(file_bytes, sep=None, encoding="utf-8"):
+    return pd.read_csv(io.BytesIO(file_bytes), sep=sep or None, engine="python", encoding=encoding)
+
+def try_fix_mojibake_df(df):
+    import unicodedata
+    def fix_text(x):
+        if not isinstance(x, str):
+            return x
+        try:
+            # typical mojibake fix: text was UTF-8 decoded as latin1 -> re-encode latin1, decode utf-8
+            return x.encode("latin1").decode("utf-8")
+        except Exception:
+            return x
+    # fix column names
+    df = df.rename(columns={c: fix_text(c) for c in df.columns})
+    # fix string cells (best-effort)
+    for c in df.columns:
+        if df[c].dtype == "object":
+            df[c] = df[c].astype(str).map(fix_text)
+    return df
+
+def normalize_str_series(s):
+    import unicodedata
+    def norm(x):
+        if not isinstance(x, str):
+            x = "" if pd.isna(x) else str(x)
+        x = unicodedata.normalize("NFKD", x)
+        x = "".join(ch for ch in x if not unicodedata.combining(ch))
+        return x.casefold().strip()
+    return s.astype(str).map(norm)
 
 @st.cache_data
 def load_excel(file_bytes):
@@ -45,22 +74,36 @@ def fmt_pct(x):
 # ------------- UI -------------
 st.title("📊 Resumen mensual de base Treble.ai — con Panel KPI")
 
+
 with st.expander("📥 Cargar datos", expanded=True):
+    st.write("**Si ves acentos raros (Ã³, Ã±, etc.) usa 'latin1' o habilita 'Reparar acentos'.**")
+    encoding_choice = st.selectbox("Codificación del archivo", ["utf-8", "latin1", "cp1252"], index=0)
+    fix_mojibake = st.checkbox("Reparar acentos (mojibake típico UTF-8↔Latin1)", value=True)
+
     file = st.file_uploader("Sube un archivo CSV o XLSX", type=["csv", "xlsx"])
-    delimiter = st.text_input("Delimitador (opcional, deja vacío para autodetectar)", value="")
+    
+delimiter = st.selectbox("Delimitador", [",",";","\\t","|","(autodetect)"], index=4)
+custom_delim = st.text_input("Delimitador personalizado (opcional)", value="")
+chosen_sep = None if delimiter=="(autodetect)" and not custom_delim else (custom_delim if custom_delim else ("\t" if delimiter=="\\t" else delimiter))
+
     sheet_name = st.text_input("Nombre de hoja (XLSX, opcional)", value="")
 
     df = None
     if file is not None:
         try:
             if file.type.endswith("csv"):
-                df = load_csv(file.read(), sep=delimiter or None)
+                raw = file.read()
+                df = load_csv(raw, sep=chosen_sep, encoding=encoding_choice)
+                if fix_mojibake:
+                    df = try_fix_mojibake_df(df)
             else:
                 content = file.read()
                 if sheet_name.strip():
                     df = pd.read_excel(io.BytesIO(content), sheet_name=sheet_name.strip())
                 else:
                     df = load_excel(content)
+                if fix_mojibake:
+                    df = try_fix_mojibake_df(df)
         except Exception as e:
             st.error(f"Error leyendo el archivo: {e}")
 
@@ -71,19 +114,53 @@ if df is None:
     st.stop()
 
 df.columns = [c.strip() for c in df.columns]
+# recortar espacios en celdas string
+for c in df.columns:
+    if df[c].dtype == "object":
+        df[c] = df[c].astype(str).str.strip()
+
 
 candidate_date_cols = [
     "Fecha del despliegue", "fecha_del_despliegue", "fecha", "Fecha", "created_at", "timestamp", "última actividad", "ultima actividad", "ultima_actividad", "updated_at"
 ]
-date_col = st.selectbox("Selecciona la columna de fecha", [c for c in df.columns if c in candidate_date_cols] or list(df.columns), index=0)
 
-df[date_col] = coerce_datetime(df[date_col])
-df = df[~df[date_col].isna()].copy()
-if df.empty:
-    st.error("No hay filas con fecha válida. Revisa el archivo/columna seleccionada.")
+date_col = st.selectbox("Selecciona la columna de fecha principal", [c for c in df.columns if c in candidate_date_cols] or list(df.columns), index=0)
+fallback_date_col = st.selectbox("Columna de fecha de respaldo (opcional)", ["(ninguna)"] + list(df.columns), index=0)
+
+date_parse_mode = st.radio("Formato de fecha", ["Auto (inferir)","Día primero (DD/MM/YYYY)","Mes primero (MM/DD/YYYY)","ISO (YYYY-MM-DD HH:mm:ss)"], horizontal=True)
+
+def parse_dates(series, mode):
+    s = series.astype(str).str.strip()
+    if mode == "Día primero (DD/MM/YYYY)":
+        return pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
+    if mode == "Mes primero (MM/DD/YYYY)":
+        return pd.to_datetime(s, errors="coerce", dayfirst=False, infer_datetime_format=True)
+    if mode == "ISO (YYYY-MM-DD HH:mm:ss)":
+        return pd.to_datetime(s, errors="coerce", format="%Y-%m-%d %H:%M:%S")
+    return pd.to_datetime(s, errors="coerce", infer_datetime_format=True, dayfirst=True)
+
+df["_dt_main"] = parse_dates(df[date_col], date_parse_mode)
+if fallback_date_col != "(ninguna)":
+    df["_dt_fallback"] = parse_dates(df[fallback_date_col], date_parse_mode)
+    df["_dt"] = df["_dt_main"].fillna(df["_dt_fallback"])
+else:
+    df["_dt"] = df["_dt_main"]
+
+
+
+invalid_dates = df["_dt"].isna().sum()
+total_rows_loaded = len(df)
+if invalid_dates > 0:
+    st.warning(f"Se cargarón {total_rows_loaded} filas; **{invalid_dates}** no tienen fecha válida y serán excluidas del resumen. Revisa el delimitador/formato de fecha.")
+
+df_valid = df[~df["_dt"].isna()].copy()
+if df_valid.empty:
+    st.error("No hay filas con fecha válida. Ajusta delimitador o formato de fecha.")
     st.stop()
 
-df["_month"] = month_label(df[date_col])
+df_valid["_month"] = pd.to_datetime(df_valid["_dt"]).dt.strftime("%Y-%m")
+df = df_valid
+
 
 # ======= Sección existente: Resumen por mes (filtrado rápido) =======
 st.markdown("## 📅 Resumen mensual (filtrado por Año/Mes)")
@@ -122,6 +199,19 @@ for c in cols_to_summarize:
                         .groupby(c).size().sort_values(ascending=False).rename("conteo").reset_index())
         st.subheader(c)
         st.dataframe(tbl, use_container_width=True)
+
+
+with st.expander("🧪 Diagnóstico de carga", expanded=False):
+    st.write(f"Filas cargadas: **{total_rows_loaded}**")
+    st.write(f"Filas con fecha inválida: **{invalid_dates}**")
+    st.write("Ejemplos de fechas no parseadas:")
+    if invalid_dates > 0:
+        bad_samples = (df[pd.isna(df["_dt"])][[date_col] + ([fallback_date_col] if fallback_date_col!="(ninguna)" else [])]
+                       .head(10))
+        st.dataframe(bad_samples, use_container_width=True)
+    st.write("Distribución por mes detectado (todas las filas válidas):")
+    st.dataframe(df["_month"].value_counts().sort_index().rename_axis("Mes").reset_index(name="Filas"), use_container_width=True)
+
 
 st.markdown("---")
 
@@ -172,13 +262,17 @@ if calc_mode == "Conteo por valor categórico":
 if suggested:
     st.info("Se pre-cargaron reglas sugeridas con base en los nombres de columnas detectados. Ajusta si es necesario.")
 
+
 def apply_rule(group_df, rule):
     if rule["mode"] == "count_by_value":
         col = rule["column"]
         vals = [str(v) for v in rule.get("values", [])]
         if col not in group_df.columns or len(vals) == 0:
             return np.nan
-        return group_df[group_df[col].astype(str).isin(vals)].shape[0]
+        # normalize both sides (case/accents tolerant and robust to mojibake)
+        left = normalize_str_series(group_df[col])
+        right = [v for v in normalize_str_series(pd.Series(vals)).tolist()]
+        return left.isin(right).sum()
     else:
         col = rule["column"]
         if col not in group_df.columns:
