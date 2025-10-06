@@ -121,6 +121,21 @@ fallback_date_col = st.selectbox("Columna de fecha de respaldo (opcional)", ["(n
 
 date_parse_mode = st.radio("Formato de fecha", ["Auto (inferir)","Día primero (DD/MM/YYYY)","Mes primero (MM/DD/YYYY)","ISO (YYYY-MM-DD HH:mm:ss)"], horizontal=True)
 
+
+# Modo de extracción de mes (sin convertir a datetime)
+month_mode = st.radio("Modo de selección de mes", ["Parseo de fecha (recomendado)", "Extraer AAAA-MM (regex, sin convertir)"], horizontal=True)
+
+def extract_year_month_regex(series, pattern=r"(\d{4})[-/](\d{2})"):
+    import re
+    s = series.astype(str)
+    ym = s.str.extract(pattern, expand=True)
+    # ym[0]=year, ym[1]=month
+    out = ym.apply(lambda r: f"{r[0]}-{r[1]}" if pd.notna(r[0]) and pd.notna(r[1]) else pd.NA, axis=1)
+    return out
+
+custom_regex = st.text_input("Regex para AAAA-MM (opcional)", value=r"(\\d{4})[-/](\\d{2})")
+
+
 def parse_dates(series, mode):
     s = series.astype(str).str.strip()
     if mode == "Día primero (DD/MM/YYYY)":
@@ -131,37 +146,64 @@ def parse_dates(series, mode):
         return pd.to_datetime(s, errors="coerce", format="%Y-%m-%d %H:%M:%S")
     return pd.to_datetime(s, errors="coerce", infer_datetime_format=True, dayfirst=True)
 
-df["_dt_main"] = parse_dates(df[date_col], date_parse_mode)
-if fallback_date_col != "(ninguna)":
-    df["_dt_fallback"] = parse_dates(df[fallback_date_col], date_parse_mode)
-    df["_dt"] = df["_dt_main"].fillna(df["_dt_fallback"])
+
+if month_mode == "Parseo de fecha (recomendado)":
+    df["_dt_main"] = parse_dates(df[date_col], date_parse_mode)
+    if fallback_date_col != "(ninguna)":
+        df["_dt_fallback"] = parse_dates(df[fallback_date_col], date_parse_mode)
+        df["_dt"] = df["_dt_main"].fillna(df["_dt_fallback"])
+    else:
+        df["_dt"] = df["_dt_main"]
+
+    invalid_dates = df["_dt"].isna().sum()
+    total_rows_loaded = len(df)
+    if invalid_dates > 0:
+        st.warning(f"Se cargaron {total_rows_loaded} filas; **{invalid_dates}** no tienen fecha válida y serán excluidas del resumen.")
+
+    df_valid = df[~df["_dt"].isna()].copy()
+    if df_valid.empty:
+        st.error("No hay filas con fecha válida. Ajusta delimitador o formato de fecha, o cambia a 'Extraer AAAA-MM (regex)'.")
+        st.stop()
+
+    df_valid["_month"] = pd.to_datetime(df_valid["_dt"]).dt.strftime("%Y-%m")
+    df = df_valid
 else:
-    df["_dt"] = df["_dt_main"]
+    # Regex mode: no datetime parsing, just extract AAAA-MM
+    patt = custom_regex if custom_regex.strip() else r"(\\d{4})[-/](\\d{2})"
+    ym = extract_year_month_regex(df[date_col], patt)
+    if fallback_date_col != "(ninguna)":
+        ym_fb = extract_year_month_regex(df[fallback_date_col], patt)
+        ym = ym.fillna(ym_fb)
+    total_rows_loaded = len(df)
+    unmatched = ym.isna().sum()
+    if unmatched > 0:
+        st.warning(f"Se cargaron {total_rows_loaded} filas; **{unmatched}** no contienen patrón AAAA-MM según el regex y se excluirán.")
+    df_valid = df[ym.notna()].copy()
+    if df_valid.empty:
+        st.error("No se extrajo ningún AAAA-MM con el regex. Ajusta el patrón o elige otra columna de fecha.")
+        st.stop()
+    df_valid["_month"] = ym[ym.notna()].values
+    df = df_valid
+    invalid_dates = unmatched  # para que el panel de diagnóstico muestre algo coherente
 
-invalid_dates = df["_dt"].isna().sum()
-total_rows_loaded = len(df)
-if invalid_dates > 0:
-    st.warning(f"Se cargaron {total_rows_loaded} filas; **{invalid_dates}** no tienen fecha válida y serán excluidas del resumen.")
-
-df_valid = df[~df["_dt"].isna()].copy()
-if df_valid.empty:
-    st.error("No hay filas con fecha válida. Ajusta delimitador o formato de fecha.")
-    st.stop()
-
-df_valid["_month"] = pd.to_datetime(df_valid["_dt"]).dt.strftime("%Y-%m")
-df = df_valid
 
 # ---------------- Monthly filter section ----------------
 st.markdown("## 📅 Resumen mensual (filtrado por Año/Mes)")
 
-years_sorted = sorted(pd.to_datetime(df["_dt"]).dt.year.unique().tolist(), reverse=True)
+
+# Derivar año y mes desde _month (AAAA-MM)
+df["_year"] = df["_month"].str.slice(0,4).astype(int)
+df["_month_num"] = df["_month"].str.slice(5,7).astype(int)
+
+years_sorted = sorted(df["_year"].unique().tolist(), reverse=True)
 selected_year = st.selectbox("Año", years_sorted, index=0)
-months = sorted(pd.to_datetime(df[df["_dt"].dt.year == selected_year]["_dt"]).dt.month.unique().tolist())
+months = sorted(df.loc[df["_year"] == selected_year, "_month_num"].unique().tolist())
 month_names = {1:"Enero",2:"Febrero",3:"Marzo",4:"Abril",5:"Mayo",6:"Junio",7:"Julio",8:"Agosto",9:"Septiembre",10:"Octubre",11:"Noviembre",12:"Diciembre"}
-month_display = [f"{m:02d} - {month_names[m]}" for m in months]
+month_display = [f"{m:02d} - {month_names.get(m, str(m))}" for m in months]
 selected_month_disp = st.selectbox("Mes", month_display, index=len(month_display)-1)
 selected_month = int(selected_month_disp.split(" - ")[0])
 selected_ym = f"{selected_year}-{selected_month:02d}"
+
 
 default_cols = [c for c in [
     "Estado del despliegue","Estado de la conversación","Estado de la sesión",
@@ -190,7 +232,22 @@ for c in cols_to_summarize:
         st.dataframe(tbl, use_container_width=True)
 
 # ---------------- Diagnostics ----------------
+
 with st.expander("🧪 Diagnóstico de carga", expanded=False):
+    st.write(f"Filas cargadas: **{total_rows_loaded}**")
+    if month_mode == "Parseo de fecha (recomendado)":
+        st.write(f"Filas con fecha inválida: **{invalid_dates}**")
+        if invalid_dates > 0:
+            bad_cols = [date_col] + ([fallback_date_col] if fallback_date_col != "(ninguna)" else [])
+            st.write("Ejemplos de fechas no parseadas:")
+            st.dataframe(df[pd.isna(df.get('_dt', pd.Series([False]*len(df))))][bad_cols].head(10) if invalid_dates > 0 else pd.DataFrame(), use_container_width=True)
+    else:
+        st.write(f"Filas sin patrón AAAA-MM: **{invalid_dates}**")
+        st.caption("En modo regex no se convierte a fecha; solo se extrae AAAA-MM del texto.")
+
+    st.write("Distribución por mes detectado (filas válidas):")
+    st.dataframe(df["_month"].value_counts().sort_index().rename_axis("Mes").reset_index(name="Filas"), use_container_width=True)
+
     st.write(f"Filas cargadas: **{total_rows_loaded}**")
     st.write(f"Filas con fecha inválida: **{invalid_dates}**")
     if invalid_dates > 0:
