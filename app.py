@@ -1,10 +1,6 @@
-
 import io
-import sys
-import json
 import pandas as pd
 import numpy as np
-from datetime import datetime
 import streamlit as st
 
 st.set_page_config(page_title="Resumen mensual Treble.ai", page_icon="📊", layout="wide")
@@ -61,28 +57,39 @@ def fmt_int(x):
         return f"{int(x):,}".replace(",", ".")
     except Exception:
         return ""
+
 def fmt_pct(x):
     return f"{x:.1f}%" if pd.notna(x) else ""
+
+def parse_dates(series, mode):
+    s = series.astype(str).str.strip()
+    if mode == "Día primero (DD/MM/YYYY)":
+        return pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
+    if mode == "Mes primero (MM/DD/YYYY)":
+        return pd.to_datetime(s, errors="coerce", dayfirst=False, infer_datetime_format=True)
+    if mode == "ISO (YYYY-MM-DD HH:mm:ss)":
+        return pd.to_datetime(s, errors="coerce", format="%Y-%m-%d %H:%M:%S")
+    return pd.to_datetime(s, errors="coerce", infer_datetime_format=True, dayfirst=True)
+
+def extract_year_month_regex(series, pattern=r"(\d{4})[-/](\d{2})"):
+    s = series.astype(str)
+    ym = s.str.extract(pattern, expand=True)
+    out = ym.apply(lambda r: f"{r[0]}-{r[1]}" if pd.notna(r[0]) and pd.notna(r[1]) else pd.NA, axis=1)
+    return out
 
 # ---------------- UI ----------------
 st.title("📊 Resumen mensual de base Treble.ai — con Panel KPI")
 
 with st.expander("📥 Cargar datos", expanded=True):
     st.write("**Si ves acentos raros (Ã³, Ã±, etc.), prueba con 'latin1' y habilita 'Reparar acentos'.**")
-
-    # File upload
     file = st.file_uploader("Sube un archivo CSV o XLSX", type=["csv", "xlsx"])
-
-    # Encoding & mojibake
     encoding_choice = st.selectbox("Codificación del archivo", ["utf-8", "latin1", "cp1252"], index=0)
     fix_mojibake = st.checkbox("Reparar acentos (mojibake típico UTF-8↔Latin1)", value=True)
 
-    # Delimiter controls
-    delimiter = st.selectbox("Delimitador", [",",";","\\t","|","(autodetect)"], index=4)
+    delimiter = st.selectbox("Delimitador", [",",";","\t","|","(autodetect)"], index=4)
     custom_delim = st.text_input("Delimitador personalizado (opcional)", value="")
-    chosen_sep = None if delimiter=="(autodetect)" and not custom_delim else (custom_delim if custom_delim else ("\t" if delimiter=="\\t" else delimiter))
+    chosen_sep = None if delimiter == "(autodetect)" and not custom_delim else (custom_delim if custom_delim else ("\t" if delimiter == "\t" else delimiter))
 
-    # Excel sheet name
     sheet_name = st.text_input("Nombre de hoja (XLSX, opcional)", value="")
 
     df = None
@@ -119,45 +126,20 @@ candidate_date_cols = [
 date_col = st.selectbox("Selecciona la columna de fecha principal", [c for c in df.columns if c in candidate_date_cols] or list(df.columns), index=0)
 fallback_date_col = st.selectbox("Columna de fecha de respaldo (opcional)", ["(ninguna)"] + list(df.columns), index=0)
 
-date_parse_mode = st.radio("Formato de fecha", ["Auto (inferir)","Día primero (DD/MM/YYYY)","Mes primero (MM/DD/YYYY)","ISO (YYYY-MM-DD HH:mm:ss)"], horizontal=True)
-
-
-# Modo de extracción de mes (sin convertir a datetime)
+# Month selection mode
+date_parse_mode = st.radio("Formato de fecha (cuando aplica)", ["Auto (inferir)", "Día primero (DD/MM/YYYY)", "Mes primero (MM/DD/YYYY)", "ISO (YYYY-MM-DD HH:mm:ss)"], horizontal=True)
 month_mode = st.radio("Modo de selección de mes", ["Extraer primeros 7 (YYYY-MM)", "Parseo de fecha (recomendado)", "Extraer AAAA-MM (regex, sin convertir)"], index=0, horizontal=True)
+custom_regex = st.text_input("Regex para AAAA-MM (solo modo regex)", value=r"(\d{4})[-/](\d{2})")
 
-def extract_year_month_regex(series, pattern=r"(\d{4})[-/](\d{2})"):
-    import re
-    s = series.astype(str)
-    ym = s.str.extract(pattern, expand=True)
-    # ym[0]=year, ym[1]=month
-    out = ym.apply(lambda r: f"{r[0]}-{r[1]}" if pd.notna(r[0]) and pd.notna(r[1]) else pd.NA, axis=1)
-    return out
-
-custom_regex = st.text_input("Regex para AAAA-MM (opcional)", value=r"(\\d{4})[-/](\\d{2})")
-
-
-def parse_dates(series, mode):
-    s = series.astype(str).str.strip()
-    if mode == "Día primero (DD/MM/YYYY)":
-        return pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
-    if mode == "Mes primero (MM/DD/YYYY)":
-        return pd.to_datetime(s, errors="coerce", dayfirst=False, infer_datetime_format=True)
-    if mode == "ISO (YYYY-MM-DD HH:mm:ss)":
-        return pd.to_datetime(s, errors="coerce", format="%Y-%m-%d %H:%M:%S")
-    return pd.to_datetime(s, errors="coerce", infer_datetime_format=True, dayfirst=True)
-
-
-
+# Build _month according to selected mode
 if month_mode == "Extraer primeros 7 (YYYY-MM)":
-    # Slice los primeros 7 caracteres 'YYYY-MM'
     def slice7(s):
-        return s.astype(str).str.strip().str.slice(0,7)
+        return s.astype(str).str.strip().str.slice(0, 7)
     ym = slice7(df[date_col])
     if fallback_date_col != "(ninguna)":
         ym_fb = slice7(df[fallback_date_col])
         ym = ym.where(ym.str.match(r"^\d{4}-\d{2}$"), ym_fb)
     total_rows_loaded = len(df)
-    # valida patrón YYYY-MM
     bad_mask = ~ym.fillna("").str.match(r"^\d{4}-\d{2}$")
     unmatched = bad_mask.sum()
     if unmatched > 0:
@@ -168,33 +150,26 @@ if month_mode == "Extraer primeros 7 (YYYY-MM)":
         st.stop()
     df_valid["_month"] = ym[~bad_mask].values
     df = df_valid
-    invalid_dates = unmatched  # para el panel diagnóstico
-el
-if month_mode == "Parseo de fecha (recomendado)":
-
-
+    invalid_dates = unmatched
+elif month_mode == "Parseo de fecha (recomendado)":
     df["_dt_main"] = parse_dates(df[date_col], date_parse_mode)
     if fallback_date_col != "(ninguna)":
         df["_dt_fallback"] = parse_dates(df[fallback_date_col], date_parse_mode)
         df["_dt"] = df["_dt_main"].fillna(df["_dt_fallback"])
     else:
         df["_dt"] = df["_dt_main"]
-
     invalid_dates = df["_dt"].isna().sum()
     total_rows_loaded = len(df)
     if invalid_dates > 0:
         st.warning(f"Se cargaron {total_rows_loaded} filas; **{invalid_dates}** no tienen fecha válida y serán excluidas del resumen.")
-
     df_valid = df[~df["_dt"].isna()].copy()
     if df_valid.empty:
-        st.error("No hay filas con fecha válida. Ajusta delimitador o formato de fecha, o cambia a 'Extraer AAAA-MM (regex)'.")
+        st.error("No hay filas con fecha válida. Ajusta delimitador o formato de fecha, o cambia a 'Extraer primeros 7'.")
         st.stop()
-
     df_valid["_month"] = pd.to_datetime(df_valid["_dt"]).dt.strftime("%Y-%m")
     df = df_valid
 else:
-    # Regex mode: no datetime parsing, just extract AAAA-MM
-    patt = custom_regex if custom_regex.strip() else r"(\\d{4})[-/](\\d{2})"
+    patt = custom_regex if custom_regex.strip() else r"(\d{4})[-/](\d{2})"
     ym = extract_year_month_regex(df[date_col], patt)
     if fallback_date_col != "(ninguna)":
         ym_fb = extract_year_month_regex(df[fallback_date_col], patt)
@@ -209,16 +184,14 @@ else:
         st.stop()
     df_valid["_month"] = ym[ym.notna()].values
     df = df_valid
-    invalid_dates = unmatched  # para que el panel de diagnóstico muestre algo coherente
-
+    invalid_dates = unmatched
 
 # ---------------- Monthly filter section ----------------
 st.markdown("## 📅 Resumen mensual (filtrado por Año/Mes)")
 
-
-# Derivar año y mes desde _month (AAAA-MM)
-df["_year"] = df["_month"].str.slice(0,4).astype(int)
-df["_month_num"] = df["_month"].str.slice(5,7).astype(int)
+# Derivar año y mes desde _month
+df["_year"] = df["_month"].str.slice(0, 4).astype(int)
+df["_month_num"] = df["_month"].str.slice(5, 7).astype(int)
 
 years_sorted = sorted(df["_year"].unique().tolist(), reverse=True)
 selected_year = st.selectbox("Año", years_sorted, index=0)
@@ -228,7 +201,6 @@ month_display = [f"{m:02d} - {month_names.get(m, str(m))}" for m in months]
 selected_month_disp = st.selectbox("Mes", month_display, index=len(month_display)-1)
 selected_month = int(selected_month_disp.split(" - ")[0])
 selected_ym = f"{selected_year}-{selected_month:02d}"
-
 
 default_cols = [c for c in [
     "Estado del despliegue","Estado de la conversación","Estado de la sesión",
@@ -257,53 +229,14 @@ for c in cols_to_summarize:
         st.dataframe(tbl, use_container_width=True)
 
 # ---------------- Diagnostics ----------------
-
 with st.expander("🧪 Diagnóstico de carga", expanded=False):
     st.write(f"Filas cargadas: **{total_rows_loaded}**")
-    
-if month_mode == "Extraer primeros 7 (YYYY-MM)":
-    # Slice los primeros 7 caracteres 'YYYY-MM'
-    def slice7(s):
-        return s.astype(str).str.strip().str.slice(0,7)
-    ym = slice7(df[date_col])
-    if fallback_date_col != "(ninguna)":
-        ym_fb = slice7(df[fallback_date_col])
-        ym = ym.where(ym.str.match(r"^\d{4}-\d{2}$"), ym_fb)
-    total_rows_loaded = len(df)
-    # valida patrón YYYY-MM
-    bad_mask = ~ym.fillna("").str.match(r"^\d{4}-\d{2}$")
-    unmatched = bad_mask.sum()
-    if unmatched > 0:
-        st.warning(f"Se cargaron {total_rows_loaded} filas; **{unmatched}** no cumplen patrón 'YYYY-MM' en los primeros 7 caracteres y se excluirán.")
-    df_valid = df[~bad_mask].copy()
-    if df_valid.empty:
-        st.error("No se obtuvo ningún 'YYYY-MM' al cortar los primeros 7. Revisa la columna seleccionada o usa otro modo.")
-        st.stop()
-    df_valid["_month"] = ym[~bad_mask].values
-    df = df_valid
-    invalid_dates = unmatched  # para el panel diagnóstico
-el
-if month_mode == "Parseo de fecha (recomendado)":
-
-
+    if month_mode == "Parseo de fecha (recomendado)":
         st.write(f"Filas con fecha inválida: **{invalid_dates}**")
-        if invalid_dates > 0:
-            bad_cols = [date_col] + ([fallback_date_col] if fallback_date_col != "(ninguna)" else [])
-            st.write("Ejemplos de fechas no parseadas:")
-            st.dataframe(df[pd.isna(df.get('_dt', pd.Series([False]*len(df))))][bad_cols].head(10) if invalid_dates > 0 else pd.DataFrame(), use_container_width=True)
+    elif month_mode == "Extraer primeros 7 (YYYY-MM)":
+        st.write(f"Filas con formato inválido en primeros 7 (YYYY-MM): **{invalid_dates}**")
     else:
-        st.write(f"Filas sin patrón AAAA-MM: **{invalid_dates}**")
-        st.caption("En modo regex no se convierte a fecha; solo se extrae AAAA-MM del texto.")
-
-    st.write("Distribución por mes detectado (filas válidas):")
-    st.dataframe(df["_month"].value_counts().sort_index().rename_axis("Mes").reset_index(name="Filas"), use_container_width=True)
-
-    st.write(f"Filas cargadas: **{total_rows_loaded}**")
-    st.write(f"Filas con fecha inválida: **{invalid_dates}**")
-    if invalid_dates > 0:
-        bad_cols = [date_col] + ([fallback_date_col] if fallback_date_col != "(ninguna)" else [])
-        st.write("Ejemplos de fechas no parseadas:")
-        st.dataframe(df[pd.isna(df['_dt'])][bad_cols].head(10) if invalid_dates > 0 else pd.DataFrame(), use_container_width=True)
+        st.write(f"Filas sin patrón AAAA-MM (regex): **{invalid_dates}**")
     st.write("Distribución por mes detectado (filas válidas):")
     st.dataframe(df["_month"].value_counts().sort_index().rename_axis("Mes").reset_index(name="Filas"), use_container_width=True)
 
@@ -333,7 +266,7 @@ with colB:
     rule_clicks = kpi_selector("Clics")
     rule_avance = kpi_selector("Avance")
 
-# Suggested defaults if columns look familiar
+# Suggested defaults
 suggested = False
 if calc_mode == "Conteo por valor categórico":
     def set_rule(col_name, ok_vals):
@@ -341,14 +274,13 @@ if calc_mode == "Conteo por valor categórico":
     if "Estado del despliegue" in df.columns:
         vals = normalize_str_series(df["Estado del despliegue"]).unique().tolist()
         if "enviado" in vals or "en proceso" in vals:
-            # treat 'en proceso' as enviado si aplica en tu operación
-            rule_envios = set_rule("Estado del despliegue", ["En proceso","Enviado","Entregado"]); suggested=True
+            rule_envios = set_rule("Estado del despliegue", ["En proceso","Enviado","Entregado"]); suggested = True
         if "entregado" in vals:
-            rule_entregas = set_rule("Estado del despliegue", ["Entregado"]); suggested=True
+            rule_entregas = set_rule("Estado del despliegue", ["Entregado"]); suggested = True
     if "hubspot_treble_avances_emp_0" in df.columns:
         nonzero = [v for v in df["hubspot_treble_avances_emp_0"].astype(str).unique().tolist() if str(v) not in ["0","nan",""]]
         if nonzero:
-            rule_avance = set_rule("hubspot_treble_avances_emp_0", nonzero); suggested=True
+            rule_avance = set_rule("hubspot_treble_avances_emp_0", nonzero); suggested = True
 
 if suggested:
     st.info("Se pre-cargaron reglas sugeridas con base en los nombres de columnas detectados. Ajusta si es necesario.")
@@ -410,4 +342,4 @@ col1.download_button("⬇ Descargar KPI (crudo, CSV)", data=kpi_df.to_csv(index=
 col2.download_button("⬇ Descargar KPI (formateado, CSV)", data=disp_df.to_csv(index=False).encode("utf-8"),
                      file_name="kpi_mensual_formateado.csv", mime="text/csv")
 
-st.caption("Si algún archivo sigue contando de menos, revisa el panel de diagnóstico. Si quieres que deje fijas tus reglas (ENVIADO/ENTREGADO, etc.), indícame nombres/valores exactos y lo cableo por defecto.")
+st.caption("Modo por defecto: cortar 'YYYY-MM' de los primeros 7 caracteres. Si necesitas dejar reglas fijas para Envios/Entregas/Clics/Avance, dímelo y lo codifico por defecto.")
