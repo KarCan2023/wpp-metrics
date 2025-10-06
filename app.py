@@ -77,8 +77,8 @@ def extract_year_month_regex(series, pattern=r"(\d{4})[-/](\d{2})"):
     out = ym.apply(lambda r: f"{r[0]}-{r[1]}" if pd.notna(r[0]) and pd.notna(r[1]) else pd.NA, axis=1)
     return out
 
-# ---------------- UI ----------------
-st.title("📊 Resumen mensual de base Treble.ai — con Panel KPI")
+# ---------------- UI: Carga ----------------
+st.title("📊 Resumen mensual Treble.ai")
 
 with st.expander("📥 Cargar datos", expanded=True):
     st.write("**Si ves acentos raros (Ã³, Ã±, etc.), prueba con 'latin1' y habilita 'Reparar acentos'.**")
@@ -112,29 +112,28 @@ if df is None:
     st.info("Carga un archivo para continuar. También puedes probar con el *sample_data.csv* del repo.")
     st.stop()
 
-# Clean headers and strings
+# Limpieza básica
 df.columns = [c.strip() for c in df.columns]
 for c in df.columns:
     if df[c].dtype == "object":
         df[c] = df[c].astype(str).str.strip()
 
-# Date column selection
+# Selección de columna de fecha y modo de mes
 candidate_date_cols = [
-    "Fecha del despliegue", "fecha_del_despliegue", "fecha", "Fecha", "created_at", "timestamp",
-    "Última actividad", "última actividad", "ultima actividad", "ultima_actividad", "updated_at"
+    "Fecha del despliegue","fecha_del_despliegue","fecha","Fecha","created_at","timestamp",
+    "Última actividad","última actividad","ultima actividad","ultima_actividad","updated_at"
 ]
-date_col = st.selectbox("Selecciona la columna de fecha principal", [c for c in df.columns if c in candidate_date_cols] or list(df.columns), index=0)
+date_col = st.selectbox("Columna de fecha principal", [c for c in df.columns if c in candidate_date_cols] or list(df.columns), index=0)
 fallback_date_col = st.selectbox("Columna de fecha de respaldo (opcional)", ["(ninguna)"] + list(df.columns), index=0)
 
-# Month selection mode
-date_parse_mode = st.radio("Formato de fecha (cuando aplica)", ["Auto (inferir)", "Día primero (DD/MM/YYYY)", "Mes primero (MM/DD/YYYY)", "ISO (YYYY-MM-DD HH:mm:ss)"], horizontal=True)
+date_parse_mode = st.radio("Formato de fecha (cuando aplica)", ["Auto (inferir)","Día primero (DD/MM/YYYY)","Mes primero (MM/DD/YYYY)","ISO (YYYY-MM-DD HH:mm:ss)"], horizontal=True)
 month_mode = st.radio("Modo de selección de mes", ["Extraer primeros 7 (YYYY-MM)", "Parseo de fecha (recomendado)", "Extraer AAAA-MM (regex, sin convertir)"], index=0, horizontal=True)
 custom_regex = st.text_input("Regex para AAAA-MM (solo modo regex)", value=r"(\d{4})[-/](\d{2})")
 
-# Build _month according to selected mode
+# Construcción de _month
 if month_mode == "Extraer primeros 7 (YYYY-MM)":
     def slice7(s):
-        return s.astype(str).str.strip().str.slice(0, 7)
+        return s.astype(str).str.strip().str.slice(0,7)
     ym = slice7(df[date_col])
     if fallback_date_col != "(ninguna)":
         ym_fb = slice7(df[fallback_date_col])
@@ -152,6 +151,15 @@ if month_mode == "Extraer primeros 7 (YYYY-MM)":
     df = df_valid
     invalid_dates = unmatched
 elif month_mode == "Parseo de fecha (recomendado)":
+    def parse_dates(series, mode):
+        s = series.astype(str).str.strip()
+        if mode == "Día primero (DD/MM/YYYY)":
+            return pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
+        if mode == "Mes primero (MM/DD/YYYY)":
+            return pd.to_datetime(s, errors="coerce", dayfirst=False, infer_datetime_format=True)
+        if mode == "ISO (YYYY-MM-DD HH:mm:ss)":
+            return pd.to_datetime(s, errors="coerce", format="%Y-%m-%d %H:%M:%S")
+        return pd.to_datetime(s, errors="coerce", infer_datetime_format=True, dayfirst=True)
     df["_dt_main"] = parse_dates(df[date_col], date_parse_mode)
     if fallback_date_col != "(ninguna)":
         df["_dt_fallback"] = parse_dates(df[fallback_date_col], date_parse_mode)
@@ -169,10 +177,9 @@ elif month_mode == "Parseo de fecha (recomendado)":
     df_valid["_month"] = pd.to_datetime(df_valid["_dt"]).dt.strftime("%Y-%m")
     df = df_valid
 else:
-    patt = custom_regex if custom_regex.strip() else r"(\d{4})[-/](\d{2})"
-    ym = extract_year_month_regex(df[date_col], patt)
+    ym = extract_year_month_regex(df[date_col], custom_regex if custom_regex.strip() else r"(\d{4})[-/](\d{2})")
     if fallback_date_col != "(ninguna)":
-        ym_fb = extract_year_month_regex(df[fallback_date_col], patt)
+        ym_fb = extract_year_month_regex(df[fallback_date_col], custom_regex if custom_regex.strip() else r"(\d{4})[-/](\d{2})")
         ym = ym.fillna(ym_fb)
     total_rows_loaded = len(df)
     unmatched = ym.isna().sum()
@@ -186,13 +193,109 @@ else:
     df = df_valid
     invalid_dates = unmatched
 
-# ---------------- Monthly filter section ----------------
-st.markdown("## 📅 Resumen mensual (filtrado por Año/Mes)")
+# -------- KPI PANEL FIRST --------
+st.markdown("## 🧭 Panel KPI mensual (tipo '1 Envío - 30 Min')")
+st.caption("Defaults se aplican solo en el primer render. Tus cambios no se sobrescriben.")
 
-# Derivar año y mes desde _month
+# Derivar año y mes para otras secciones igualmente
 df["_year"] = df["_month"].str.slice(0, 4).astype(int)
 df["_month_num"] = df["_month"].str.slice(5, 7).astype(int)
 
+# KPI widgets
+def kpi_selector(name, default_col=None, default_vals=None):
+    calc_mode = st.session_state.get("calc_mode", "Conteo por valor categórico")
+    if calc_mode == "Conteo por valor categórico":
+        options = list(df.columns)
+        if default_col in options and f"cat_{name}" not in st.session_state:
+            cat_index = options.index(default_col)
+        else:
+            cat_index = 0
+        col = st.selectbox(f"{name}: columna categórica", options=options, index=cat_index, key=f"cat_{name}")
+        values = sorted(df[col].astype(str).unique().tolist())
+        if default_vals and f"vals_{name}" not in st.session_state and col == default_col:
+            val = st.multiselect(f"{name}: valores que cuentan", options=values, default=[v for v in default_vals if v in values], key=f"vals_{name}")
+        else:
+            val = st.multiselect(f"{name}: valores que cuentan", options=values, key=f"vals_{name}")
+        return {"mode": "count_by_value", "column": col, "values": val}
+    else:
+        options = list(df.columns)
+        if default_col in options and f"num_{name}" not in st.session_state:
+            idx = options.index(default_col)
+        else:
+            idx = 0
+        col = st.selectbox(f"{name}: columna numérica (se sumará)", options=options, index=idx, key=f"num_{name}")
+        return {"mode": "sum_numeric", "column": col}
+
+calc_mode = st.radio("Modo de cálculo de KPIs", ["Conteo por valor categórico", "Suma de columna numérica"], horizontal=True, key="calc_mode")
+
+# Defaults solicitados
+env_def_col, env_def_vals = "_month", None
+ent_def_col, ent_def_vals = "Estado", None
+ava_def_col, ava_def_vals = "hubspot_treble_avances_emp_0", None
+
+colA, colB = st.columns(2)
+with colA:
+    rule_envios = kpi_selector("Envios", default_col=env_def_col, default_vals=env_def_vals)
+    rule_entregas = kpi_selector("Entregas", default_col=ent_def_col, default_vals=ent_def_vals)
+with colB:
+    rule_clicks = kpi_selector("Clics")
+    rule_avance = kpi_selector("Avance", default_col=ava_def_col, default_vals=ava_def_vals)
+
+def apply_rule(group_df, rule):
+    if rule["mode"] == "count_by_value":
+        col = rule["column"]
+        vals = [str(v) for v in rule.get("values", [])]
+        if col not in group_df.columns or len(vals) == 0:
+            return np.nan
+        left = normalize_str_series(group_df[col])
+        right = normalize_str_series(pd.Series(vals)).tolist()
+        return left.isin(right).sum()
+    else:
+        col = rule["column"]
+        if col not in group_df.columns:
+            return np.nan
+        return pd.to_numeric(group_df[col], errors="coerce").fillna(0).sum()
+
+# Aggregate monthly KPIs
+kpi_months = []
+for ym, g in df.groupby("_month"):
+    env = apply_rule(g, rule_envios)
+    ent = apply_rule(g, rule_entregas)
+    clk = apply_rule(g, rule_clicks)
+    av = apply_rule(g, rule_avance)
+    paso = pct(av, clk)
+    ent_vs_av = pct(av, ent)
+    kpi_months.append({
+        "Mes": ym, "Envios": env, "Entregas": ent, "Clics": clk, "Avance": av,
+        "Paso Perfilamiento (%)": paso, "Entregas vs Avance (%)": ent_vs_av
+    })
+
+kpi_df = pd.DataFrame(kpi_months).sort_values("Mes")
+
+# Render KPI
+disp_rows, prev = [], None
+for _, r in kpi_df.iterrows():
+    row = {"Mes": r["Mes"]}
+    for key in ["Envios","Entregas","Clics","Avance"]:
+        arrow = trend_arrow(r[key], (prev[key] if prev is not None else np.nan))
+        row[key] = f"{fmt_int(r[key])} {arrow}".strip()
+    for key in ["Paso Perfilamiento (%)","Entregas vs Avance (%)"]:
+        arrow = trend_arrow(r[key], (prev[key] if prev is not None else np.nan))
+        row[key] = f"{fmt_pct(r[key])} {arrow}".strip()
+    disp_rows.append(row)
+    prev = r
+disp_df = pd.DataFrame(disp_rows)
+
+st.markdown("### Panel KPI mensual")
+st.dataframe(disp_df.rename(columns={
+    "Paso Perfilamiento (%)":"Paso Perfilamiento",
+    "Entregas vs Avance (%)":"Entregas vs Avance"
+}), use_container_width=True)
+
+st.markdown("---")
+
+# -------- Resto: Resumen mensual por selección (debajo) --------
+st.markdown("## 📅 Resumen mensual (filtrado por Año/Mes)")
 years_sorted = sorted(df["_year"].unique().tolist(), reverse=True)
 selected_year = st.selectbox("Año", years_sorted, index=0)
 months = sorted(df.loc[df["_year"] == selected_year, "_month_num"].unique().tolist())
@@ -228,126 +331,10 @@ for c in cols_to_summarize:
         st.subheader(c)
         st.dataframe(tbl, use_container_width=True)
 
-# ---------------- Diagnostics ----------------
+# Diagnóstico
 with st.expander("🧪 Diagnóstico de carga", expanded=False):
     st.write(f"Filas cargadas: **{total_rows_loaded}**")
-    if month_mode == "Parseo de fecha (recomendado)":
-        st.write(f"Filas con fecha inválida: **{invalid_dates}**")
-    elif month_mode == "Extraer primeros 7 (YYYY-MM)":
-        st.write(f"Filas con formato inválido en primeros 7 (YYYY-MM): **{invalid_dates}**")
-    else:
-        st.write(f"Filas sin patrón AAAA-MM (regex): **{invalid_dates}**")
     st.write("Distribución por mes detectado (filas válidas):")
     st.dataframe(df["_month"].value_counts().sort_index().rename_axis("Mes").reset_index(name="Filas"), use_container_width=True)
 
-st.markdown("---")
-
-# ---------------- KPI Panel ----------------
-st.markdown("## 🧭 Panel KPI mensual (tipo '1 Envío - 30 Min')")
-st.caption("Defaults se aplican solo en el primer render. Tus cambios no se sobrescriben.")
-
-def kpi_selector(name, default_col=None, default_vals=None):
-    calc_mode = st.session_state.get("calc_mode", "Conteo por valor categórico")
-    if calc_mode == "Conteo por valor categórico":
-        options = list(df.columns)
-        if default_col in options and f"cat_{name}" not in st.session_state:
-            cat_index = options.index(default_col)
-        else:
-            cat_index = 0
-        col = st.selectbox(f"{name}: columna categórica", options=options, index=cat_index, key=f"cat_{name}")
-        values = sorted(df[col].astype(str).unique().tolist())
-        if default_vals and f"vals_{name}" not in st.session_state and col == default_col:
-            val = st.multiselect(f"{name}: valores que cuentan", options=values, default=[v for v in default_vals if v in values], key=f"vals_{name}")
-        else:
-            val = st.multiselect(f"{name}: valores que cuentan", options=values, key=f"vals_{name}")
-        return {"mode": "count_by_value", "column": col, "values": val}
-    else:
-        options = list(df.columns)
-        if default_col in options and f"num_{name}" not in st.session_state:
-            idx = options.index(default_col)
-        else:
-            idx = 0
-        col = st.selectbox(f"{name}: columna numérica (se sumará)", options=options, index=idx, key=f"num_{name}")
-        return {"mode": "sum_numeric", "column": col}
-
-calc_mode = st.radio("Modo de cálculo de KPIs", ["Conteo por valor categórico", "Suma de columna numérica"], horizontal=True, key="calc_mode")
-
-# Suggested defaults passed as defaults only
-env_def_col, env_def_vals = None, None
-ent_def_col, ent_def_vals = None, None
-clk_def_col, clk_def_vals = None, None
-ava_def_col, ava_def_vals = None, None
-
-if "Estado del despliegue" in df.columns:
-    env_def_col, env_def_vals = "Estado del despliegue", ["En proceso","Enviado","Entregado"]
-    ent_def_col, ent_def_vals = "Estado del despliegue", ["Entregado"]
-if "hubspot_treble_avances_emp_0" in df.columns:
-    ava_def_col = "hubspot_treble_avances_emp_0"
-    ava_def_vals = [v for v in df["hubspot_treble_avances_emp_0"].astype(str).unique().tolist() if str(v) not in ["0","nan",""]]
-
-colA, colB = st.columns(2)
-with colA:
-    rule_envios = kpi_selector("Envios", default_col=env_def_col, default_vals=env_def_vals)
-    rule_entregas = kpi_selector("Entregas", default_col=ent_def_col, default_vals=ent_def_vals)
-with colB:
-    rule_clicks = kpi_selector("Clics", default_col=clk_def_col, default_vals=clk_def_vals)
-    rule_avance = kpi_selector("Avance", default_col=ava_def_col, default_vals=ava_def_vals)
-
-def apply_rule(group_df, rule):
-    if rule["mode"] == "count_by_value":
-        col = rule["column"]
-        vals = [str(v) for v in rule.get("values", [])]
-        if col not in group_df.columns or len(vals) == 0:
-            return np.nan
-        left = normalize_str_series(group_df[col])
-        right = normalize_str_series(pd.Series(vals)).tolist()
-        return left.isin(right).sum()
-    else:
-        col = rule["column"]
-        if col not in group_df.columns:
-            return np.nan
-        return pd.to_numeric(group_df[col], errors="coerce").fillna(0).sum()
-
-# Aggregate monthly KPIs
-kpi_months = []
-for ym, g in df.groupby("_month"):
-    env = apply_rule(g, rule_envios)
-    ent = apply_rule(g, rule_entregas)
-    clk = apply_rule(g, rule_clicks)
-    av = apply_rule(g, rule_avance)
-    paso = pct(av, clk)
-    ent_vs_av = pct(av, ent)
-    kpi_months.append({
-        "Mes": ym, "Envios": env, "Entregas": ent, "Clics": clk, "Avance": av,
-        "Paso Perfilamiento (%)": paso, "Entregas vs Avance (%)": ent_vs_av
-    })
-
-kpi_df = pd.DataFrame(kpi_months).sort_values("Mes")
-
-# Render with MoM arrows
-disp_rows, prev = [], None
-for _, r in kpi_df.iterrows():
-    row = {"Mes": r["Mes"]}
-    for key in ["Envios","Entregas","Clics","Avance"]:
-        arrow = trend_arrow(r[key], (prev[key] if prev is not None else np.nan))
-        row[key] = f"{fmt_int(r[key])} {arrow}".strip()
-    for key in ["Paso Perfilamiento (%)","Entregas vs Avance (%)"]:
-        arrow = trend_arrow(r[key], (prev[key] if prev is not None else np.nan))
-        row[key] = f"{fmt_pct(r[key])} {arrow}".strip()
-    disp_rows.append(row)
-    prev = r
-
-disp_df = pd.DataFrame(disp_rows)
-st.markdown("### Panel KPI mensual")
-st.dataframe(disp_df.rename(columns={
-    "Paso Perfilamiento (%)":"Paso Perfilamiento",
-    "Entregas vs Avance (%)":"Entregas vs Avance"
-}), use_container_width=True)
-
-col1, col2 = st.columns(2)
-col1.download_button("⬇ Descargar KPI (crudo, CSV)", data=kpi_df.to_csv(index=False).encode("utf-8"),
-                     file_name="kpi_mensual_crudo.csv", mime="text/csv")
-col2.download_button("⬇ Descargar KPI (formateado, CSV)", data=disp_df.to_csv(index=False).encode("utf-8"),
-                     file_name="kpi_mensual_formateado.csv", mime="text/csv")
-
-st.caption("Defaults sugeridos solo en el primer render. Luego, tus cambios en los selectores mandan.")
+st.caption("KPI arriba, resumen abajo. Defaults de columnas precargados: Envios = _month, Entregas = Estado, Avance = hubspot_treble_avances_emp_0.")
