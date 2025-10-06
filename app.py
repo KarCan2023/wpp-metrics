@@ -123,7 +123,7 @@ date_parse_mode = st.radio("Formato de fecha", ["Auto (inferir)","Día primero (
 
 
 # Modo de extracción de mes (sin convertir a datetime)
-month_mode = st.radio("Modo de selección de mes", ["Parseo de fecha (recomendado)", "Extraer AAAA-MM (regex, sin convertir)"], horizontal=True)
+month_mode = st.radio("Modo de selección de mes", ["Extraer primeros 7 (YYYY-MM)", "Parseo de fecha (recomendado)", "Extraer AAAA-MM (regex, sin convertir)"], index=0, horizontal=True)
 
 def extract_year_month_regex(series, pattern=r"(\d{4})[-/](\d{2})"):
     import re
@@ -147,7 +147,32 @@ def parse_dates(series, mode):
     return pd.to_datetime(s, errors="coerce", infer_datetime_format=True, dayfirst=True)
 
 
+
+if month_mode == "Extraer primeros 7 (YYYY-MM)":
+    # Slice los primeros 7 caracteres 'YYYY-MM'
+    def slice7(s):
+        return s.astype(str).str.strip().str.slice(0,7)
+    ym = slice7(df[date_col])
+    if fallback_date_col != "(ninguna)":
+        ym_fb = slice7(df[fallback_date_col])
+        ym = ym.where(ym.str.match(r"^\d{4}-\d{2}$"), ym_fb)
+    total_rows_loaded = len(df)
+    # valida patrón YYYY-MM
+    bad_mask = ~ym.fillna("").str.match(r"^\d{4}-\d{2}$")
+    unmatched = bad_mask.sum()
+    if unmatched > 0:
+        st.warning(f"Se cargaron {total_rows_loaded} filas; **{unmatched}** no cumplen patrón 'YYYY-MM' en los primeros 7 caracteres y se excluirán.")
+    df_valid = df[~bad_mask].copy()
+    if df_valid.empty:
+        st.error("No se obtuvo ningún 'YYYY-MM' al cortar los primeros 7. Revisa la columna seleccionada o usa otro modo.")
+        st.stop()
+    df_valid["_month"] = ym[~bad_mask].values
+    df = df_valid
+    invalid_dates = unmatched  # para el panel diagnóstico
+el
 if month_mode == "Parseo de fecha (recomendado)":
+
+
     df["_dt_main"] = parse_dates(df[date_col], date_parse_mode)
     if fallback_date_col != "(ninguna)":
         df["_dt_fallback"] = parse_dates(df[fallback_date_col], date_parse_mode)
@@ -235,7 +260,32 @@ for c in cols_to_summarize:
 
 with st.expander("🧪 Diagnóstico de carga", expanded=False):
     st.write(f"Filas cargadas: **{total_rows_loaded}**")
-    if month_mode == "Parseo de fecha (recomendado)":
+    
+if month_mode == "Extraer primeros 7 (YYYY-MM)":
+    # Slice los primeros 7 caracteres 'YYYY-MM'
+    def slice7(s):
+        return s.astype(str).str.strip().str.slice(0,7)
+    ym = slice7(df[date_col])
+    if fallback_date_col != "(ninguna)":
+        ym_fb = slice7(df[fallback_date_col])
+        ym = ym.where(ym.str.match(r"^\d{4}-\d{2}$"), ym_fb)
+    total_rows_loaded = len(df)
+    # valida patrón YYYY-MM
+    bad_mask = ~ym.fillna("").str.match(r"^\d{4}-\d{2}$")
+    unmatched = bad_mask.sum()
+    if unmatched > 0:
+        st.warning(f"Se cargaron {total_rows_loaded} filas; **{unmatched}** no cumplen patrón 'YYYY-MM' en los primeros 7 caracteres y se excluirán.")
+    df_valid = df[~bad_mask].copy()
+    if df_valid.empty:
+        st.error("No se obtuvo ningún 'YYYY-MM' al cortar los primeros 7. Revisa la columna seleccionada o usa otro modo.")
+        st.stop()
+    df_valid["_month"] = ym[~bad_mask].values
+    df = df_valid
+    invalid_dates = unmatched  # para el panel diagnóstico
+el
+if month_mode == "Parseo de fecha (recomendado)":
+
+
         st.write(f"Filas con fecha inválida: **{invalid_dates}**")
         if invalid_dates > 0:
             bad_cols = [date_col] + ([fallback_date_col] if fallback_date_col != "(ninguna)" else [])
